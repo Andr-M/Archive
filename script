@@ -1,0 +1,588 @@
+package com.javarush.test.level31.lesson15.big01;
+
+import com.javarush.test.level31.lesson15.big01.exception.WrongZipFileException;
+
+import java.io.IOException;
+
+public class Archiver {
+    public static void main(String[] args) throws Exception {
+        Operation operation = null;
+        do {
+            try {
+                operation = askOperation();
+                CommandExecutor.execute(operation);
+            } catch (WrongZipFileException e) {
+                ConsoleHelper.writeMessage("Вы не выбрали файл архива или выбрали неверный файл.");
+            } /*catch (Exception e) {
+                ConsoleHelper.writeMessage("Произошла ошибка. Проверьте введенные данные.");
+            }*/
+
+        } while (operation != Operation.EXIT);
+    }
+
+
+    public static Operation askOperation() throws IOException {
+        ConsoleHelper.writeMessage("");
+        ConsoleHelper.writeMessage("Выберите операцию:");
+        ConsoleHelper.writeMessage(String.format("\t %d - упаковать файлы в архив", Operation.CREATE.ordinal()));
+        ConsoleHelper.writeMessage(String.format("\t %d - добавить файл в архив", Operation.ADD.ordinal()));
+        ConsoleHelper.writeMessage(String.format("\t %d - удалить файл из архива", Operation.REMOVE.ordinal()));
+        ConsoleHelper.writeMessage(String.format("\t %d - распаковать архив", Operation.EXTRACT.ordinal()));
+        ConsoleHelper.writeMessage(String.format("\t %d - просмотреть содержимое архива", Operation.CONTENT.ordinal()));
+        ConsoleHelper.writeMessage(String.format("\t %d - выход", Operation.EXIT.ordinal()));
+
+        return Operation.values()[ConsoleHelper.readInt()];
+    }
+}
+
+****
+
+package com.javarush.test.level31.lesson15.big01;
+
+import com.javarush.test.level31.lesson15.big01.command.*;
+
+import java.util.HashMap;
+import java.util.Map;
+
+public class CommandExecutor {
+    private static final Map<Operation, Command> allKnownCommandsMap = new HashMap<>();
+
+    static {
+        allKnownCommandsMap.put(Operation.CREATE, new ZipCreateCommand());
+        allKnownCommandsMap.put(Operation.ADD, new ZipAddCommand());
+        allKnownCommandsMap.put(Operation.REMOVE, new ZipRemoveCommand());
+        allKnownCommandsMap.put(Operation.EXTRACT, new ZipExtractCommand());
+        allKnownCommandsMap.put(Operation.CONTENT, new ZipContentCommand());
+        allKnownCommandsMap.put(Operation.EXIT, new ExitCommand());
+    }
+
+    private CommandExecutor() {
+    }
+
+    public static void execute(Operation operation) throws Exception {
+        allKnownCommandsMap.get(operation).execute();
+    }
+}
+
+*****
+
+package com.javarush.test.level31.lesson15.big01;
+
+import java.io.IOException;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+
+public class FileManager {
+    private Path rootPath;
+    private List<Path> fileList;
+
+    public FileManager(Path rootPath) throws IOException {
+        this.rootPath = rootPath;
+        this.fileList = new ArrayList<>();
+        collectFileList(rootPath);
+    }
+
+    public List<Path> getFileList() {
+        return fileList;
+    }
+
+    private void collectFileList(Path path) throws IOException {
+        // Добавляем только файлы
+        if (Files.isRegularFile(path)) {
+            Path relativePath = rootPath.relativize(path); // get relative path relative to 'rootPath'
+            fileList.add(relativePath);
+        }
+
+        // Добавляем содержимое директории
+        if (Files.isDirectory(path)) {
+            // Рекурсивно проходимся по всему содержмому директории
+            // Чтобы не писать код по вызову close для DirectoryStream, обернем вызов newDirectoryStream в try-with-resources
+            try (DirectoryStream<Path> directoryStream = Files.newDirectoryStream(path)) {
+                for (Path file : directoryStream) {
+                    collectFileList(file);
+                }
+            }
+        }
+    }
+}
+
+****
+
+package com.javarush.test.level31.lesson15.big01;
+
+public class FileProperties {
+    private String name;
+    private long size;
+    private long compressedSize;
+    private int compressionMethod;
+
+    public FileProperties(String name, long size, long compressedSize, int compressionMethod) {
+        this.name = name;
+        this.size = size;
+        this.compressedSize = compressedSize;
+        this.compressionMethod = compressionMethod;
+    }
+
+
+    public String getName() {
+        return name;
+    }
+
+    public long getSize() {
+        return size;
+    }
+
+    public long getCompressedSize() {
+        return compressedSize;
+    }
+
+    public int getCompressionMethod() {
+        return compressionMethod;
+    }
+
+    public long getCompressionRatio() {
+        // Вычисляем степень сжатия
+        return 100 - ((compressedSize * 100) / size);
+    }
+
+    @Override
+    public String toString() {
+        // Строим красивую строку из свойств
+        StringBuilder builder = new StringBuilder();
+        builder.append(name);
+        if (size > 0) {
+            builder.append("\t");
+            builder.append(size / 1024);
+            builder.append(" Kb (");
+            builder.append(compressedSize / 1024);
+            builder.append(" Kb) сжатие: ");
+            builder.append(getCompressionRatio());
+            builder.append("%");
+        }
+
+        return builder.toString();
+    }
+}
+
+****
+
+package com.javarush.test.level31.lesson15.big01;
+
+import com.javarush.test.level31.lesson15.big01.exception.PathIsNotFoundException;
+import com.javarush.test.level31.lesson15.big01.exception.WrongZipFileException;
+
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+import java.util.zip.ZipOutputStream;
+
+public class ZipFileManager {
+    // Полный путь zip файла
+    private final Path zipFile;
+
+    public ZipFileManager(Path zipFile) {
+        this.zipFile = zipFile;
+    }
+
+    public void createZip(Path source) throws Exception {
+        // Проверяем, существует ли директория, где будет создаваться архив
+        // При необходимости создаем ее
+        Path zipDirectory = zipFile.getParent();
+        if (Files.notExists(zipDirectory))
+            Files.createDirectories(zipDirectory);
+
+        // Создаем zip поток
+        try (ZipOutputStream zipOutputStream = new ZipOutputStream(Files.newOutputStream(zipFile))) {
+
+            if (Files.isDirectory(source)) {
+                // Если архивируем директорию, то нужно получить список файлов в ней
+                FileManager fileManager = new FileManager(source);
+                List<Path> fileNames = fileManager.getFileList();
+
+                // Добавляем каждый файл в архив
+                for (Path fileName : fileNames)
+                    addNewZipEntry(zipOutputStream, source, fileName);
+
+            } else if (Files.isRegularFile(source)) {
+
+                // Если архивируем отдельный файл, то нужно получить его директорию и имя
+                addNewZipEntry(zipOutputStream, source.getParent(), source.getFileName());
+            } else {
+
+                // Если переданный source не директория и не файл, бросаем исключение
+                throw new PathIsNotFoundException();
+            }
+        }
+    }
+
+    public void extractAll(Path outputFolder) throws Exception {
+        // Проверяем существует ли zip файл
+        if (!Files.isRegularFile(zipFile)) {
+            throw new WrongZipFileException();
+        }
+
+        try (ZipInputStream zipInputStream = new ZipInputStream(Files.newInputStream(zipFile))) {
+            // Создаем директорию вывода, если она не существует
+            if (Files.notExists(outputFolder))
+                Files.createDirectories(outputFolder);
+
+            // Проходимся по содержимому zip потока (файла)
+            ZipEntry zipEntry = zipInputStream.getNextEntry();
+
+            while (zipEntry != null) {
+                String fileName = zipEntry.getName();
+                Path fileFullName = outputFolder.resolve(fileName);
+
+                // Создаем необходимые директории
+                Path parent = fileFullName.getParent();
+                if (Files.notExists(parent))
+                    Files.createDirectories(parent);
+
+                try (OutputStream outputStream = Files.newOutputStream(fileFullName)) {
+                    copyData(zipInputStream, outputStream);
+                }
+                zipEntry = zipInputStream.getNextEntry();
+            }
+        }
+    }
+
+    public void removeFile(Path path) throws Exception {
+        removeFiles(Collections.singletonList(path));
+    }
+
+    public void removeFiles(List<Path> pathList) throws Exception {
+        // Проверяем существует ли zip файл
+        if (!Files.isRegularFile(zipFile)) {
+            throw new WrongZipFileException();
+        }
+
+        // Создаем временный файл
+        Path tempZipFile = Files.createTempFile(null, null);
+
+        try (ZipOutputStream zipOutputStream = new ZipOutputStream(Files.newOutputStream(tempZipFile))) {
+            try (ZipInputStream zipInputStream = new ZipInputStream(Files.newInputStream(zipFile))) {
+
+                ZipEntry zipEntry = zipInputStream.getNextEntry();
+                while (zipEntry != null) {
+
+                    Path archivedFile = Paths.get(zipEntry.getName());
+
+                    if (!pathList.contains(archivedFile)) {
+                        String fileName = zipEntry.getName();
+                        zipOutputStream.putNextEntry(new ZipEntry(fileName));
+
+                        copyData(zipInputStream, zipOutputStream);
+
+                        zipOutputStream.closeEntry();
+                        zipInputStream.closeEntry();
+                    }
+                    else {
+                        ConsoleHelper.writeMessage(String.format("Файл '%s' удален из архива.", archivedFile.toString()));
+                    }
+                    zipEntry = zipInputStream.getNextEntry();
+                }
+            }
+        }
+
+        // Перемещаем временный файл на место оригинального
+        Files.move(tempZipFile, zipFile, StandardCopyOption.REPLACE_EXISTING);
+    }
+
+    public void addFile(Path absolutePath) throws Exception {
+        addFiles(Collections.singletonList(absolutePath));
+    }
+
+    public void addFiles(List<Path> absolutePathList) throws Exception {
+        // Проверяем существует ли zip файл
+        if (!Files.isRegularFile(zipFile)) {
+            throw new WrongZipFileException();
+        }
+
+        // Создаем временный файл
+        Path tempZipFile = Files.createTempFile(null, null);
+        List<Path> archiveFiles = new ArrayList<>();
+
+        try (ZipOutputStream zipOutputStream = new ZipOutputStream(Files.newOutputStream(tempZipFile))) {
+            try (ZipInputStream zipInputStream = new ZipInputStream(Files.newInputStream(zipFile))) {
+
+                ZipEntry zipEntry = zipInputStream.getNextEntry();
+                while (zipEntry != null) {
+                    String fileName = zipEntry.getName();
+                    archiveFiles.add(Paths.get(fileName));
+
+                    zipOutputStream.putNextEntry(new ZipEntry(fileName));
+                    copyData(zipInputStream, zipOutputStream);
+
+                    zipInputStream.closeEntry();
+                    zipOutputStream.closeEntry();
+
+                    zipEntry = zipInputStream.getNextEntry();
+                }
+            }
+
+            // Архивируем новые файлы
+            for (Path file : absolutePathList) {
+                if (Files.isRegularFile(file))
+                {
+                    if (archiveFiles.contains(file.getFileName()))
+                        ConsoleHelper.writeMessage(String.format("Файл '%s' уже существует в архиве.", file.toString()));
+                    else {
+                        addNewZipEntry(zipOutputStream, file.getParent(), file.getFileName());
+                        ConsoleHelper.writeMessage(String.format("Файл '%s' добавлен в архиве.", file.toString()));
+                    }
+                }
+                else
+                    throw new PathIsNotFoundException();
+            }
+        }
+
+        // Перемещаем временный файл на место оригинального
+        Files.move(tempZipFile, zipFile, StandardCopyOption.REPLACE_EXISTING);
+    }
+
+    public List<FileProperties> getFilesList() throws Exception {
+        // Проверяем существует ли zip файл
+        if (!Files.isRegularFile(zipFile)) {
+            throw new WrongZipFileException();
+        }
+
+        List<FileProperties> files = new ArrayList<>();
+
+        try (ZipInputStream zipInputStream = new ZipInputStream(Files.newInputStream(zipFile))) {
+            ZipEntry zipEntry = zipInputStream.getNextEntry();
+
+            while (zipEntry != null) {
+                // Поля "размер" и "сжатый размер" не известны, пока элемент не будет прочитан
+                // Давайте вычитаем его в какой-то выходной поток
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                copyData(zipInputStream, baos);
+
+                FileProperties file = new FileProperties(zipEntry.getName(), zipEntry.getSize(), zipEntry.getCompressedSize(), zipEntry.getMethod());
+                files.add(file);
+                zipEntry = zipInputStream.getNextEntry();
+            }
+        }
+
+        return files;
+    }
+
+    private void addNewZipEntry(ZipOutputStream zipOutputStream, Path filePath, Path fileName) throws Exception {
+        Path fullPath = filePath.resolve(fileName);
+        try (InputStream inputStream = Files.newInputStream(fullPath)) {
+            ZipEntry entry = new ZipEntry(fileName.toString());
+
+            zipOutputStream.putNextEntry(entry);
+
+            copyData(inputStream, zipOutputStream);
+
+            zipOutputStream.closeEntry();
+        }
+    }
+
+    private void copyData(InputStream in, OutputStream out) throws Exception {
+        byte[] buffer = new byte[8 * 1024];
+        int len;
+        while ((len = in.read(buffer)) > 0) {
+            out.write(buffer, 0, len);
+        }
+    }
+}
+
+****
+
+package com.javarush.test.level31.lesson15.big01.command;
+
+public interface Command {
+    void execute() throws Exception;
+}
+
+***
+package com.javarush.test.level31.lesson15.big01.command;
+
+import com.javarush.test.level31.lesson15.big01.ConsoleHelper;
+
+public class ExitCommand implements Command {
+    @Override
+    public void execute() throws Exception {
+        ConsoleHelper.writeMessage("До встречи!");
+    }
+}
+
+***
+package com.javarush.test.level31.lesson15.big01.command;
+
+import com.javarush.test.level31.lesson15.big01.ConsoleHelper;
+import com.javarush.test.level31.lesson15.big01.ZipFileManager;
+import com.javarush.test.level31.lesson15.big01.exception.PathIsNotFoundException;
+
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
+public class ZipAddCommand extends ZipCommand {
+    @Override
+    public void execute() throws Exception {
+        try {
+            ConsoleHelper.writeMessage("Добавление нового файла в архив.");
+
+            ZipFileManager zipFileManager = getZipFileManager();
+
+            ConsoleHelper.writeMessage("Введите полное имя файла для добавления:");
+            Path sourcePath = Paths.get(ConsoleHelper.readString());
+
+            zipFileManager.addFile(sourcePath);
+
+            ConsoleHelper.writeMessage("Добавление в архив завершено.");
+
+        } catch (PathIsNotFoundException e) {
+            ConsoleHelper.writeMessage("Файл не был найден.");
+        }
+    }
+}
+
+*****
+
+package com.javarush.test.level31.lesson15.big01.command;
+
+import com.javarush.test.level31.lesson15.big01.ConsoleHelper;
+import com.javarush.test.level31.lesson15.big01.ZipFileManager;
+
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
+public abstract class ZipCommand implements Command {
+
+    public ZipFileManager getZipFileManager() throws Exception{
+        ConsoleHelper.writeMessage("Введите полный путь файла архива:");
+        Path zipPath = Paths.get(ConsoleHelper.readString());
+        return new ZipFileManager(zipPath);
+    }
+}
+
+******
+
+package com.javarush.test.level31.lesson15.big01.command;
+
+import com.javarush.test.level31.lesson15.big01.ConsoleHelper;
+import com.javarush.test.level31.lesson15.big01.FileProperties;
+import com.javarush.test.level31.lesson15.big01.ZipFileManager;
+
+import java.util.List;
+
+public class ZipContentCommand extends ZipCommand {
+    @Override
+    public void execute() throws Exception {
+        ConsoleHelper.writeMessage("Просмотр содержимого архива.");
+
+        ZipFileManager zipFileManager = getZipFileManager();
+
+        ConsoleHelper.writeMessage("Содержимое архива:");
+
+        List<FileProperties> files = zipFileManager.getFilesList();
+        for (FileProperties file : files) {
+            ConsoleHelper.writeMessage(file.toString());
+        }
+
+        ConsoleHelper.writeMessage("Содержимое архива прочитано.");
+    }
+}
+
+*****
+package com.javarush.test.level31.lesson15.big01.command;
+
+import com.javarush.test.level31.lesson15.big01.ConsoleHelper;
+import com.javarush.test.level31.lesson15.big01.ZipFileManager;
+import com.javarush.test.level31.lesson15.big01.exception.PathIsNotFoundException;
+
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
+public class ZipCreateCommand extends ZipCommand {
+    @Override
+    public void execute() throws Exception {
+        try {
+            ConsoleHelper.writeMessage("Создание архива.");
+
+            ZipFileManager zipFileManager = getZipFileManager();
+
+            ConsoleHelper.writeMessage("Введите полное имя файла или директории для архивации:");
+            Path sourcePath = Paths.get(ConsoleHelper.readString());
+            zipFileManager.createZip(sourcePath);
+
+            ConsoleHelper.writeMessage("Архив создан.");
+
+        } catch (PathIsNotFoundException e) {
+            ConsoleHelper.writeMessage("Вы неверно указали имя файла или директории.");
+        }
+    }
+}
+
+****
+
+package com.javarush.test.level31.lesson15.big01.command;
+
+import com.javarush.test.level31.lesson15.big01.ConsoleHelper;
+import com.javarush.test.level31.lesson15.big01.ZipFileManager;
+import com.javarush.test.level31.lesson15.big01.exception.PathIsNotFoundException;
+
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
+public class ZipExtractCommand extends ZipCommand {
+    @Override
+    public void execute() throws Exception {
+        try {
+            ConsoleHelper.writeMessage("Распаковка архива.");
+
+            ZipFileManager zipFileManager = getZipFileManager();
+
+            ConsoleHelper.writeMessage("Введите путь для распаковки:");
+            Path destinationPath = Paths.get(ConsoleHelper.readString());
+            zipFileManager.extractAll(destinationPath);
+
+            ConsoleHelper.writeMessage("Архив был распакован.");
+
+        } catch (PathIsNotFoundException e) {
+            ConsoleHelper.writeMessage("Неверный путь для распаковки.");
+        }
+    }
+}
+
+***
+
+package com.javarush.test.level31.lesson15.big01.command;
+
+import com.javarush.test.level31.lesson15.big01.ConsoleHelper;
+import com.javarush.test.level31.lesson15.big01.ZipFileManager;
+
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
+public class ZipRemoveCommand extends ZipCommand {
+    @Override
+    public void execute() throws Exception {
+        ConsoleHelper.writeMessage("Удаление файла из архива.");
+
+        ZipFileManager zipFileManager = getZipFileManager();
+
+        ConsoleHelper.writeMessage("Введите полный путь файла в архиве:");
+        Path sourcePath = Paths.get(ConsoleHelper.readString());
+        zipFileManager.removeFile(sourcePath);
+
+        ConsoleHelper.writeMessage("Удаление из архива завершено.");
+    }
+}
+
+***
+
